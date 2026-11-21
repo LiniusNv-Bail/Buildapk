@@ -1,3 +1,4 @@
+
 name: Build Flutter APK
 
 on:
@@ -15,7 +16,7 @@ on:
         description: "debug / release"
         required: true
         default: "release"
-        
+
       only_analyze:
         description: "Hanya jalankan analyze (true/false)"
         required: false
@@ -25,9 +26,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-    
+
     steps:
 
       # =========================
@@ -44,26 +46,18 @@ jobs:
       - name: Download ZIP project
         run: |
           echo "=== Downloading ZIP ==="
-          echo "URL: ${{ github.event.inputs.zip_url }}"
 
-          curl -L \
+          curl -fL \
+            --retry 3 \
+            --retry-delay 3 \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
-            -o project.zip \
-            -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
+            -o project.zip
 
-          echo ""
           echo "=== File Info ==="
           ls -lh project.zip
-
-          echo ""
-          echo "=== File Type ==="
           file project.zip
-
-          echo ""
-          echo "=== First Bytes ==="
-          xxd project.zip | head -2
 
       # =========================
       # EXTRACT ZIP
@@ -74,36 +68,28 @@ jobs:
 
           if ! unzip -t project.zip > /dev/null 2>&1; then
             echo "❌ File bukan ZIP valid!"
-            echo ""
-            echo "=== Isi file ==="
-            cat project.zip
             exit 1
           fi
 
           echo "✅ ZIP valid"
 
-          echo ""
-          echo "=== Extracting ZIP ==="
           unzip -q project.zip -d project_raw
 
-          echo ""
-          echo "=== Isi folder project_raw ==="
+          echo "=== Project Files ==="
           find project_raw | head -50
 
-          echo ""
-          echo "=== Mengunci Project Dir (Manut Mode) ==="
-          
           SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
           FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
-          
+
           if [ "$SUB_DIR_COUNT" -eq 1 ] && [ "$FILE_COUNT" -eq 0 ]; then
             PROJECT_DIR=$(find project_raw -maxdepth 1 -mindepth 1 -type d | head -n 1)
           else
             PROJECT_DIR="project_raw"
           fi
 
-          echo "✅ Project root langsung dikunci di: $PROJECT_DIR"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Project root: $PROJECT_DIR"
 
       # =========================
       # JAVA
@@ -124,18 +110,15 @@ jobs:
           channel: "stable"
           cache: true
 
-      # ==========================================================
-      # 🔍 TAHAP ANALYZE — STEP 1: Jalankan & cetak hasil
-      # (Dipisah dari exit 1 biar log tidak ter-truncate)
-      # ==========================================================
+      # =========================
+      # ANALYZE PROJECT
+      # =========================
       - name: Analyze Project Code
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           echo "=== Starting Automated Code Analysis ==="
 
           if [ -f "pubspec.yaml" ]; then
-            echo "🔍 Menjalankan linting via flutter analyze..."
-
             flutter analyze > analyze_report.txt 2>&1 || true
 
             echo "[RESULT_ANALYZE]"
@@ -143,22 +126,19 @@ jobs:
             echo "[END_RESULT_ANALYZE]"
 
             rm -f analyze_report.txt
-
           else
-            echo "☕ Project native / gradlew terdeteksi!"
             echo "[RESULT_ANALYZE]"
-            echo "❌ Fitur analyze hanya support project Flutter (pubspec.yaml tidak ditemukan)."
+            echo "Native Android project detected."
             echo "[END_RESULT_ANALYZE]"
           fi
 
-      # ==========================================================
-      # 🔍 TAHAP ANALYZE — STEP 2: Stop workflow jika only_analyze
-      # DIPERBAIKI: Gunakan success() atau skip pakai if condition
-      # ==========================================================
+      # =========================
+      # STOP ANALYZE ONLY
+      # =========================
       - name: Stop if Analyze Only
         if: ${{ github.event.inputs.only_analyze == 'true' }}
         run: |
-          echo "✅ Analyze-only mode aktif. Workflow selesai dengan sukses."
+          echo "Analyze-only mode completed."
           exit 0
 
       # =========================
@@ -168,23 +148,24 @@ jobs:
         if: ${{ github.event.inputs.only_analyze != 'true' }}
         run: flutter doctor
 
-      # ==========================================================
-      # 📦 TAHAP DOWNLOAD DEPENDENSI (PUB GET)
-      # ==========================================================
+      # =========================
+      # GET DEPENDENCIES
+      # =========================
       - name: Get dependencies
         if: ${{ github.event.inputs.only_analyze != 'true' }}
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           echo "=== Running flutter pub get ==="
+
           if [ -f "pubspec.yaml" ]; then
-            timeout 120s flutter pub get || echo "⚠️ Gagal download package karena network server, coba lanjut aja..."
+            flutter pub get
           else
-            echo "☕ Bukan project Flutter standar, skip pub get!"
+            echo "Native Android project detected."
           fi
 
-      # ==========================================================
-      # 🚀 TAHAP PEMBAKARAN UTAMA (BUILD APK)
-      # ==========================================================
+      # =========================
+      # BUILD APK
+      # =========================
       - name: Build APK
         if: ${{ github.event.inputs.only_analyze != 'true' }}
         working-directory: ${{ env.PROJECT_DIR }}
@@ -193,30 +174,44 @@ jobs:
           echo "Mode: ${{ github.event.inputs.build_type }}"
 
           if [ -f "pubspec.yaml" ]; then
-            echo "🔥 Project Flutter Terdeteksi! Kompilasi via Flutter SDK..."
-            flutter build apk --${{ github.event.inputs.build_type }}
-            
+
+            if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
+
+              echo "Building Flutter Release APK"
+
+              flutter build apk \
+                --release \
+                --obfuscate \
+                --split-debug-info=build/debug-info
+
+            else
+
+              flutter build apk --debug
+
+            fi
+
           else
-            echo "☕ Project Native Android Terdeteksi! Bypassing Flutter Core..."
+
+            echo "Native Android project detected."
+
             GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
-            
+
             if [ -z "$GRADLE_PATH" ]; then
-              echo "❌ ERROR: File 'gradlew' tidak ditemukan!"
-              echo "FAILURE: Build failed with an exception"
+              echo "❌ gradlew tidak ditemukan!"
               exit 1
             fi
-            
+
             GRADLE_DIR=$(dirname "$GRADLE_PATH")
             cd "$GRADLE_DIR"
+
             chmod +x gradlew
-            
-            echo "🚀 Membakar APK menggunakan Gradle Native..."
+
             if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
               ./gradlew assembleDebug
             else
               ./gradlew assembleRelease
             fi
-            cd -
+
           fi
 
       # =========================
@@ -225,27 +220,96 @@ jobs:
       - name: Check APK Output
         if: ${{ github.event.inputs.only_analyze != 'true' }}
         run: |
-          echo "=== APK Output Scanning (Global Mode) ==="
+          echo "=== APK Output Scanning ==="
 
-          echo "Mencari file APK di seluruh direktori..."
-          find $GITHUB_WORKSPACE -name "*.apk"
-
-          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
+          APK_FOUND=$(find "$GITHUB_WORKSPACE" \
+            -name "*.apk" \
+            -not -path "*/build/debug-info/*" \
+            | head -n 1)
 
           if [ -z "$APK_FOUND" ]; then
-            echo "Error: Berkas biner APK beneran gak dicetak sama sekali oleh compiler."
+            echo "❌ APK tidak ditemukan!"
             exit 1
           fi
 
-          echo "✅ APK Sukses Ditemukan di: $APK_FOUND"
-          echo "APK_PATH=$APK_FOUND" >> $GITHUB_ENV
+          APK_SIZE=$(stat -c%s "$APK_FOUND")
 
-          echo ""
-          echo "=== APK Size ==="
+          APK_MB=$(awk \
+            "BEGIN {printf \"%.2f\", $APK_SIZE/1048576}")
+
+          echo "APK_PATH=$APK_FOUND" >> "$GITHUB_ENV"
+          echo "APK_SIZE_MB=$APK_MB" >> "$GITHUB_ENV"
+
+          echo "APK: $APK_FOUND"
+          echo "Size: $APK_MB MB"
+
           ls -lh "$APK_FOUND"
 
       # =========================
-      # UPLOAD APK
+      # APK CONTENT ANALYSIS
+      # =========================
+      - name: Analyze APK Contents
+        if: ${{ github.event.inputs.only_analyze != 'true' }}
+        run: |
+          echo "=== APK CONTENT ANALYSIS ==="
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq unzip
+
+          echo ""
+          echo "=== TOP 30 LARGEST FILES ==="
+
+          unzip -l "$APK_PATH" | sort -k1,1nr | head -30
+
+          echo ""
+          echo "=== NATIVE LIBRARIES ==="
+
+          unzip -l "$APK_PATH" | grep 'lib/.*\.so' || true
+
+          echo ""
+          echo "=== ASSETS ==="
+
+          unzip -l "$APK_PATH" | grep 'assets/' | head -30 || true
+
+          echo ""
+          echo "=== APK SIZE ==="
+
+          ls -lh "$APK_PATH"
+
+      # =========================
+      # VERIFY APK INTEGRITY
+      # =========================
+      - name: Verify APK Integrity
+        if: ${{ github.event.inputs.only_analyze != 'true' }}
+        run: |
+          echo "=== Verifying APK ==="
+
+          if ! unzip -t "$APK_PATH" > /dev/null 2>&1; then
+            echo "❌ APK integrity check failed!"
+            exit 1
+          fi
+
+          echo "✅ APK integrity valid"
+
+      # =========================
+      # FINAL APK REPORT
+      # =========================
+      - name: Final APK Report
+        if: ${{ github.event.inputs.only_analyze != 'true' }}
+        run: |
+          echo "================================"
+          echo "       FINAL BUILD REPORT"
+          echo "================================"
+
+          echo "Build Type: ${{ github.event.inputs.build_type }}"
+          echo "Tag: ${{ github.event.inputs.tag }}"
+          echo "APK: $APK_PATH"
+          echo "Size: $APK_SIZE_MB MB"
+
+          echo "================================"
+
+      # =========================
+      # UPLOAD APK ARTIFACT
       # =========================
       - name: Upload APK artifact
         if: ${{ github.event.inputs.only_analyze != 'true' }}
@@ -255,4 +319,3 @@ jobs:
           path: ${{ env.APK_PATH }}
           retention-days: 1
           if-no-files-found: error
-          
